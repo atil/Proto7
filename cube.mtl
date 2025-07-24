@@ -1,0 +1,5 @@
+newmtl CubeMat1
+map_Kd texture_proto1.png
+
+newmtl CubeMat2
+map_Kd texture_proto2.png

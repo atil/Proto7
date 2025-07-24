@@ -1,5 +1,6 @@
 // TODO
 // mtl files, different textures
+// (start from here: debug with renderdoc)
 // move_dir pdb file to bin and make sure remedybg/raddbg works
 // be able to click exe. get rid of path errors
 // figure out sensitivity difference between machines
@@ -38,16 +39,48 @@ typedef uint8_t u8;
 #define FONT_ATLAS_HEIGHT 512
 #define FONT_CHAR_COUNT 96
 #define FONT_TEXT_HEIGHT_PIXELS 64 // In pixels
+#define MTL_MAX_COUNT 16 // in a .mtl file
+#define MTL_NAME_LEN 32
+#define MTL_FILENAME_LEN 32
+#define MTL_TEXTURE_FILENAME_LEN 32
 
 typedef struct {
     u32 vao;
     u32 vbo;
+    u32 vertex_count;
+    u32 tex_handle;
 } gameobject_t;
 
 typedef struct {
     float* vertex_data;
     u32 vertex_count;
-} obj_t;
+    char texture_name[MTL_TEXTURE_FILENAME_LEN];
+} mesh_t;
+
+typedef struct {
+    char name[MTL_NAME_LEN];
+    char texture_name[MTL_TEXTURE_FILENAME_LEN];
+    // emission etc here
+} mtldata_t; // Single material data
+
+typedef struct {
+    mtldata_t materials[MTL_MAX_COUNT];
+    u32 mtl_count;
+} mtlasset_t;
+
+typedef struct {
+    char mtl_name[MTL_NAME_LEN]; // usemtl argument
+    u32* face_data; // Array of [v/u/n v/u/n v/u/n]
+    u32 face_count; // Number of face rows
+} objfacedata_t;
+
+typedef struct {
+    float* positions;
+    float* uvs;
+    float* normals;
+    objfacedata_t* faces;
+    u32 mtl_count;
+} objasset_t;
 
 typedef struct {
     stbtt_bakedchar font_char_data[FONT_CHAR_COUNT];
@@ -114,6 +147,48 @@ u32 create_shader(char* vert_shader_filename, char* frag_shader_filename) {
     return shader_program;
 }
 
+void render_create_buffer(gameobject_t* p_go, mesh_t* p_mesh) {
+    p_go->vertex_count = p_mesh->vertex_count;
+    glGenVertexArrays(1, &(p_go->vao));
+    glGenBuffers(1, &(p_go->vbo));
+
+    glBindVertexArray(p_go->vao);
+    glBindBuffer(GL_ARRAY_BUFFER, p_go->vbo);
+    glBufferData(GL_ARRAY_BUFFER, p_mesh->vertex_count * 9 * sizeof(float), p_mesh->vertex_data, GL_STATIC_DRAW); 
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(5 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    glGenTextures(1, &(p_go->tex_handle));
+    glBindTexture(GL_TEXTURE_2D, p_go->tex_handle);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);   
+    int img_width, img_height, img_channel_count;
+    stbi_set_flip_vertically_on_load(true);
+    u8* image_data = stbi_load(p_mesh->texture_name, &img_width, &img_height, &img_channel_count, 0);
+    assert(image_data);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img_width, img_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    stbi_image_free(image_data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void render_draw_go(gameobject_t* p_go) {
+    glBindVertexArray(p_go->vao);
+    glBindTexture(GL_TEXTURE_2D, p_go->tex_handle);
+    glDrawArrays(GL_TRIANGLES, 0, p_go->vertex_count);
+    glBindVertexArray(0);
+}
+
 void ui_init(ui_t* ui) {
     ui->shader = create_shader("shader_ui_vert.glsl", "shader_ui_frag.glsl");
     glUseProgram(ui->shader);
@@ -121,8 +196,7 @@ void ui_init(ui_t* ui) {
 
     u8* font_bytes = (u8*)read_entire_file("Consolas.ttf");
     u8* font_bitmap = malloc(FONT_ATLAS_WIDTH * FONT_ATLAS_HEIGHT * sizeof(u8));
-    stbtt_BakeFontBitmap((u8*)font_bytes, 0, FONT_TEXT_HEIGHT_PIXELS, font_bitmap, FONT_ATLAS_WIDTH,
-                         FONT_ATLAS_HEIGHT, ' ', FONT_CHAR_COUNT, ui->font_char_data);
+    stbtt_BakeFontBitmap((u8*)font_bytes, 0, FONT_TEXT_HEIGHT_PIXELS, font_bitmap, FONT_ATLAS_WIDTH, FONT_ATLAS_HEIGHT, ' ', FONT_CHAR_COUNT, ui->font_char_data);
 
     stbtt_fontinfo font_info;
     stbtt_InitFont(&font_info, font_bytes, 0);
@@ -271,39 +345,48 @@ int main(void) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    obj_t obj_data = { 0 };
-    read_obj_file("cube.obj", &obj_data);
+    mesh_t* meshes;
+    u32 mesh_count = 0;
+    read_obj_file2("cube.obj", &meshes, &mesh_count);
+    gameobject_t go1 = { 0 };
+    gameobject_t go2 = { 0 };
 
-    gameobject_t go = { 0 };
-    glGenVertexArrays(1, &go.vao);
-    glGenBuffers(1, &go.vbo);
+    render_create_buffer(&go1, &(meshes[0]));
+    render_create_buffer(&go2, &(meshes[1]));
 
-    glBindVertexArray(go.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, go.vbo);
-    glBufferData(GL_ARRAY_BUFFER, obj_data.vertex_count * 9 * sizeof(float), obj_data.vertex_data, GL_STATIC_DRAW); 
+    //mesh_t obj_data = { 0 };
+    //read_obj_file("cube.obj", &obj_data);
 
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(5 * sizeof(float)));
-    glEnableVertexAttribArray(2);
+    //gameobject_t go = { 0 };
+    //glGenVertexArrays(1, &go.vao);
+    //glGenBuffers(1, &go.vbo);
 
-    // Texture
-    u32 tex_handle;
-    glGenTextures(1, &tex_handle);
-    glBindTexture(GL_TEXTURE_2D, tex_handle);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);   
-    int img_width, img_height, img_channel_count;
-    stbi_set_flip_vertically_on_load(true);
-    u8* image_data = stbi_load("proto.png", &img_width, &img_height, &img_channel_count, 0);
-    assert(image_data);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img_width, img_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
-    glGenerateMipmap(GL_TEXTURE_2D);
-    stbi_image_free(image_data);
+    //glBindVertexArray(go.vao);
+    //glBindBuffer(GL_ARRAY_BUFFER, go.vbo);
+    //glBufferData(GL_ARRAY_BUFFER, obj_data.vertex_count * 9 * sizeof(float), obj_data.vertex_data, GL_STATIC_DRAW); 
+
+    //glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+    //glEnableVertexAttribArray(0);
+    //glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+    //glEnableVertexAttribArray(1);
+    //glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(5 * sizeof(float)));
+    //glEnableVertexAttribArray(2);
+
+    //// Texture
+    //u32 tex_handle;
+    //glGenTextures(1, &tex_handle);
+    //glBindTexture(GL_TEXTURE_2D, tex_handle);
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);   
+    //int img_width, img_height, img_channel_count;
+    //stbi_set_flip_vertically_on_load(true);
+    //u8* image_data = stbi_load(obj_data.texture_name, &img_width, &img_height, &img_channel_count, 0);
+    //assert(image_data);
+    //glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img_width, img_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
+    //glGenerateMipmap(GL_TEXTURE_2D);
+    //stbi_image_free(image_data);
 
     // Paths need to be relative to the working directory
     // https://stackoverflow.com/a/24597194/4894526
@@ -397,9 +480,13 @@ int main(void) {
         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
         glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
 
-        glBindVertexArray(go.vao);
-        glBindTexture(GL_TEXTURE_2D, tex_handle);
-        glDrawArrays(GL_TRIANGLES, 0, obj_data.vertex_count);
+        //glBindVertexArray(go.vao);
+        //glBindTexture(GL_TEXTURE_2D, tex_handle);
+        //glDrawArrays(GL_TRIANGLES, 0, obj_data.vertex_count);
+
+        glUseProgram(world_shader);
+        render_draw_go(&go1);
+        render_draw_go(&go2);
 
         glUseProgram(ui.shader);
         glBindVertexArray(ui_text.vao);
@@ -411,10 +498,11 @@ int main(void) {
         glfwPollEvents();
     }
 
-    glDeleteVertexArrays(1, &go.vao);
-    glDeleteBuffers(1, &go.vbo);
+    //glDeleteVertexArrays(1, &go.vao);
+    //glDeleteBuffers(1, &go.vbo);
+    //glDeleteTextures(1, &tex_handle);
     glDeleteProgram(world_shader);
-    glDeleteTextures(1, &tex_handle);
+    // TODO delete buffers of go's
 
     glDeleteVertexArrays(1, &(ui_text.vao));
     glDeleteBuffers(1, &(ui_text.vbo));
