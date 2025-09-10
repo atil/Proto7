@@ -1,10 +1,9 @@
-// TODO
-// mtl files, different textures
-// (start from here: debug with renderdoc)
-// move_dir pdb file to bin and make sure remedybg/raddbg works
-// be able to click exe. get rid of path errors
-// figure out sensitivity difference between machines
-// text: dynamic-content-fixed-size
+// - start from here: 
+// - [assets] handle comments correctly when computing mtl_count
+// - [infra] move_dir pdb file to bin and make sure remedybg/raddbg works
+// - [infra] be able to click exe. get rid of path errors
+// - [infra] figure out sensitivity difference between machines
+// - [ui] dynamic-content-fixed-size text
 
 #pragma warning(disable:5045) // Spectre thing
 #pragma warning(disable:4820) // Padding
@@ -19,15 +18,16 @@
 #include <math.h>
 
 #define GLEW_STATIC // Also need to include opengl32lib for this to work
-#include "GL/glew.h"
-#include "glfw3.h"
+#include <GL/glew.h>
+#include <glfw3.h>
 
 #define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+#include <stb_image.h>
 #define STB_TRUETYPE_IMPLEMENTATION 
-#include "stb_truetype.h"
+#include <stb_truetype.h>
 #pragma warning(pop)
 
+typedef size_t u64;
 typedef uint32_t u32;
 typedef int32_t i32;
 typedef uint8_t u8;
@@ -40,9 +40,9 @@ typedef uint8_t u8;
 #define FONT_CHAR_COUNT 96
 #define FONT_TEXT_HEIGHT_PIXELS 64 // In pixels
 #define MTL_MAX_COUNT 16 // in a .mtl file
-#define MTL_NAME_LEN 32
-#define MTL_FILENAME_LEN 32
-#define MTL_TEXTURE_FILENAME_LEN 32
+#define MTL_NAME_LEN 32 // name of sections inside a .mtl file
+#define MTL_FILENAME_LEN 64 // .mtl file itself
+#define MTL_TEXTURE_FILENAME_LEN 64
 
 typedef struct {
     u32 vao;
@@ -55,7 +55,7 @@ typedef struct {
     float* vertex_data;
     u32 vertex_count;
     char texture_name[MTL_TEXTURE_FILENAME_LEN];
-} mesh_t;
+} mesh_t; // Render-ready data
 
 typedef struct {
     char name[MTL_NAME_LEN];
@@ -72,13 +72,13 @@ typedef struct {
     char mtl_name[MTL_NAME_LEN]; // usemtl argument
     u32* face_data; // Array of [v/u/n v/u/n v/u/n]
     u32 face_count; // Number of face rows
-} objfacedata_t;
+} objsubdata_t;
 
 typedef struct {
     float* positions;
     float* uvs;
     float* normals;
-    objfacedata_t* faces;
+    objsubdata_t* subs;
     u32 mtl_count;
 } objasset_t;
 
@@ -95,8 +95,8 @@ typedef struct {
     u32 vertex_count;
 } uitext_t;
 
-#include "geom.h"
-#include "assets.h"
+#include "geom.c"
+#include "assets.c"
 
 u32 create_shader(char* vert_shader_filename, char* frag_shader_filename) {
     char* vert_shader_source = read_entire_file(vert_shader_filename);
@@ -154,7 +154,7 @@ void render_create_buffer(gameobject_t* p_go, mesh_t* p_mesh) {
 
     glBindVertexArray(p_go->vao);
     glBindBuffer(GL_ARRAY_BUFFER, p_go->vbo);
-    glBufferData(GL_ARRAY_BUFFER, p_mesh->vertex_count * 9 * sizeof(float), p_mesh->vertex_data, GL_STATIC_DRAW); 
+    glBufferData(GL_ARRAY_BUFFER, p_mesh->vertex_count * 8 * sizeof(float), p_mesh->vertex_data, GL_STATIC_DRAW); 
 
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
@@ -175,11 +175,20 @@ void render_create_buffer(gameobject_t* p_go, mesh_t* p_mesh) {
     int img_width, img_height, img_channel_count;
     stbi_set_flip_vertically_on_load(true);
     u8* image_data = stbi_load(p_mesh->texture_name, &img_width, &img_height, &img_channel_count, 0);
-    assert(image_data);
+    if (!image_data) {
+        printf("problem with texture file: %s\n", p_mesh->texture_name);
+        assert(false);
+    }
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img_width, img_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
     glGenerateMipmap(GL_TEXTURE_2D);
     stbi_image_free(image_data);
     glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void render_delete_go(gameobject_t* p_go) {
+    glDeleteVertexArrays(1, &(p_go->vao));
+    glDeleteBuffers(1, &(p_go->vbo));
+    glDeleteTextures(1, &(p_go->tex_handle));
 }
 
 void render_draw_go(gameobject_t* p_go) {
@@ -190,7 +199,7 @@ void render_draw_go(gameobject_t* p_go) {
 }
 
 void ui_init(ui_t* ui) {
-    ui->shader = create_shader("shader_ui_vert.glsl", "shader_ui_frag.glsl");
+    ui->shader = create_shader("src/shader_ui_vert.glsl", "src/shader_ui_frag.glsl");
     glUseProgram(ui->shader);
     glUniform1i(glGetUniformLocation(ui->shader, "u_texture_ui"), 0);
 
@@ -340,6 +349,7 @@ int main(void) {
     vec2 text_scale_pixels = { 100, 100 };
     ui_create_text_static(&ui_text, &ui, "a", text_anchor_pixels, text_scale_pixels);
 
+    glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glEnable(GL_BLEND);
@@ -347,52 +357,19 @@ int main(void) {
 
     mesh_t* meshes;
     u32 mesh_count = 0;
-    read_obj_file2("cube.obj", &meshes, &mesh_count);
-    gameobject_t go1 = { 0 };
-    gameobject_t go2 = { 0 };
+    read_obj_file("models/test_lighting.obj", &meshes, &mesh_count);
 
-    render_create_buffer(&go1, &(meshes[0]));
-    render_create_buffer(&go2, &(meshes[1]));
-
-    //mesh_t obj_data = { 0 };
-    //read_obj_file("cube.obj", &obj_data);
-
-    //gameobject_t go = { 0 };
-    //glGenVertexArrays(1, &go.vao);
-    //glGenBuffers(1, &go.vbo);
-
-    //glBindVertexArray(go.vao);
-    //glBindBuffer(GL_ARRAY_BUFFER, go.vbo);
-    //glBufferData(GL_ARRAY_BUFFER, obj_data.vertex_count * 9 * sizeof(float), obj_data.vertex_data, GL_STATIC_DRAW); 
-
-    //glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
-    //glEnableVertexAttribArray(0);
-    //glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-    //glEnableVertexAttribArray(1);
-    //glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(5 * sizeof(float)));
-    //glEnableVertexAttribArray(2);
-
-    //// Texture
-    //u32 tex_handle;
-    //glGenTextures(1, &tex_handle);
-    //glBindTexture(GL_TEXTURE_2D, tex_handle);
-    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);   
-    //int img_width, img_height, img_channel_count;
-    //stbi_set_flip_vertically_on_load(true);
-    //u8* image_data = stbi_load(obj_data.texture_name, &img_width, &img_height, &img_channel_count, 0);
-    //assert(image_data);
-    //glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img_width, img_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
-    //glGenerateMipmap(GL_TEXTURE_2D);
-    //stbi_image_free(image_data);
+#define GOS_MAX 10
+    gameobject_t gos[GOS_MAX] = { 0 };
+    assert(mesh_count < GOS_MAX);
+    for (u32 i = 0; i < mesh_count; i++) {
+        render_create_buffer(&(gos[i]), &(meshes[i]));
+    }
 
     // Paths need to be relative to the working directory
     // https://stackoverflow.com/a/24597194/4894526
-    u32 world_shader = create_shader("shader_world_vert.glsl", "shader_world_frag.glsl");
+    u32 world_shader = create_shader("src/shader_world_vert.glsl", "src/shader_world_frag.glsl");
     glUseProgram(world_shader);
-    //glActiveTexture(GL_TEXTURE0); 
     glUniform1i(glGetUniformLocation(world_shader, "u_tex"), 0);
 
     mat44 model = mat44_identity;
@@ -469,9 +446,9 @@ int main(void) {
         center = v3_add(eye, eye_forward);
         view = look_at(eye, center, up);
 
-        vec3 rotate_euler = { 0.0f, 40.0f * dt, 0.0f };
-        mat44 rotate = euler_to_rot(rotate_euler);
-        model = mat44_mul(&model, &rotate);
+        //vec3 rotate_euler = { 0.0f, 40.0f * dt, 0.0f };
+        //mat44 rotate = euler_to_rot(rotate_euler);
+        //model = mat44_mul(&model, &rotate);
 
         glUseProgram(world_shader);
         glUniformMatrix4fv(glGetUniformLocation(world_shader, "u_view"), 1, GL_FALSE, view.data);
@@ -480,13 +457,12 @@ int main(void) {
         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
         glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
 
-        //glBindVertexArray(go.vao);
-        //glBindTexture(GL_TEXTURE_2D, tex_handle);
-        //glDrawArrays(GL_TRIANGLES, 0, obj_data.vertex_count);
-
         glUseProgram(world_shader);
-        render_draw_go(&go1);
-        render_draw_go(&go2);
+
+        for (u32 i = 0; i < GOS_MAX; i++) {
+            if (gos[i].vao == 0) continue;
+            render_draw_go(&gos[i]);
+        }
 
         glUseProgram(ui.shader);
         glBindVertexArray(ui_text.vao);
@@ -498,11 +474,12 @@ int main(void) {
         glfwPollEvents();
     }
 
-    //glDeleteVertexArrays(1, &go.vao);
-    //glDeleteBuffers(1, &go.vbo);
-    //glDeleteTextures(1, &tex_handle);
     glDeleteProgram(world_shader);
-    // TODO delete buffers of go's
+
+    for (u32 i = 0; i < GOS_MAX; i++) {
+        if (gos[i].vao == 0) continue;
+        render_delete_go(&gos[i]);
+    }
 
     glDeleteVertexArrays(1, &(ui_text.vao));
     glDeleteBuffers(1, &(ui_text.vbo));
